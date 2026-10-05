@@ -89,4 +89,4 @@ On PowerShell, use `Copy-Item` instead of `cp` if preferred.
 
 - [Elyas Najeh](https://github.com/ElyasNajeh).
 - [Hareth Shoman](https://github.com/Hareth5).
-- **QA:** [Ahmad Omariyeh](https://github.com/Ahmad-Omaryeh).
+- [Ahmad Omariyeh](https://github.com/Ahmad-Omaryeh).
