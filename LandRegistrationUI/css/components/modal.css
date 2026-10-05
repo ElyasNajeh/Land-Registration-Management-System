@@ -17,6 +17,10 @@
   box-shadow: var(--shadow);
 }
 
+.modal.wide {
+  width: min(980px, 100%);
+}
+
 .modal-header,
 .modal-footer {
   display: flex;

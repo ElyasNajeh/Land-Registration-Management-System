@@ -1,390 +1,194 @@
-from fastapi import HTTPException
 from datetime import datetime, timezone
 from uuid import uuid4
+
+from bson import ObjectId
+from fastapi import HTTPException
+from pymongo import ReturnDocument
+
 from app.database.mongo import db
-from app.shared import crud
-from app.features.assignments.schemas import SurveyMilestoneRequest, SurveyReportRequest, RegistrarReviewRequest
+from app.shared.serialization import page_response, serialize
+from app.features.applications.services.log_service import create_log
 
-land_applications = db["land_applications"]
-staff_members = db["staff_members"]
-survey_tasks = db["survey_tasks"]
-performance_logs = db["performance_logs"]
-survey_reports = db["survey_reports"]
+applications = db["land_applications"]
+staff = db["staff_members"]
+tasks = db["survey_tasks"]
+reports = db["survey_reports"]
+applicants = db["applicants"]
 
-def get_all_staff():
-    found = crud.get_many(staff_members)
-    return found
-
-def auto_assign_surveyor(application_id: str):  
-    application = crud.get_one(land_applications, {"application_id": application_id})
-    if not application:
-        raise HTTPException(status_code = 404, detail = "Application not found")
-    
-    if application["status"] != "survey_required":
-        raise HTTPException(status_code = 400, detail = "Application is not in survey_required stage")
-    
-    zone = application["parcel_ref"]["zone_id"]
-    if not zone:
-        raise HTTPException(status_code = 400, detail = "Application parcel zone is missing")
-    
-    staffs = get_all_staff()
-    best_staff = None
-    min_tasks = 1e9
-    for staff in staffs:
-        if staff["role"] != "surveyor": continue
-        if staff["active"] != True: continue
-        if zone not in staff["coverage"]["zone_ids"]: continue
-        if staff["workload"]["active_tasks"] >= staff["workload"]["max_tasks"] : continue
-        if staff["workload"]["active_tasks"] >= min_tasks: continue
-
-        best_staff = staff
-        min_tasks = staff["workload"]["active_tasks"]
-
-    if best_staff == None:
-        raise HTTPException(status_code = 404, detail = "No available surveyor found for this zone")
-
-    task_id = f"SURV-2026-{uuid4().hex[:8].upper()}"
-    document = {
-        "task_id" : task_id,
-        "application_id" : application_id,
-        "parcel_id" : application["parcel_ref"]["parcel_id"],
-        "assigned_surveyor_id" : best_staff["_id"],
-        "status" : "assigned",
-        "milestones": [
-            {
-                "type": "assigned",
-                "at": datetime.now(timezone.utc),
-                "by": "system",
-                "meta": {
-                    "reason": "zone and workload match"
-                }
-            }
-        ],
-        "field_notes" : [],
-        "report_uploaded" : False,
-        "created_at" : datetime.now(timezone.utc)
-        }
-
-    inserted_id = crud.create(survey_tasks, document)
-
-    staff_members.update_one(
-    {"_id" : best_staff["_id"]},
-    {"$inc" : {"workload.active_tasks": 1}}
-    )
-
-    updated_application = crud.update_one(
-     land_applications, {"application_id": application_id}, {
-        "assignment.assigned_surveyor_id": best_staff["_id"],
-        "assignment.assignment_policy": "zone+availability+workload"
-     }
-    )
-
-    if not updated_application:
-        raise HTTPException (status_code = 404, detail = "Application not found while updating assignment")
-    
-    log_document = {
-    "application_id": application_id,
-    "event_stream": [
-        {
-            "type": "survey_assigned",
-            "by": {
-                "actor_type": "system",
-                "actor_id": "assignment_engine"
-            },
-            "at": datetime.now(timezone.utc),
-            "meta": {
-                "assigned_surveyor": best_staff["staff_code"]
-                }
-            }
-        ]
-    }
-
-    crud.create(performance_logs, log_document)
-
-    return {
-        "message": "Survey task created successfully",
-        "survey_task_id": str(inserted_id),
-        "task_id": task_id,
-        "application_id": application_id,
-        "assigned_surveyor_id": str(best_staff["_id"]),
-        "assigned_surveyor_name": best_staff["name"],
-        "zone_id": zone
-    }
-
-def add_survey_milestone(application_id: str, milestone: SurveyMilestoneRequest):
-    application = crud.get_one(land_applications, {"application_id": application_id})
-    if not application:
-        raise HTTPException(status_code = 404, detail = "Application not found")
-    
-    survey = crud.get_one(survey_tasks, {"application_id": application_id})
-    if not survey:
-        raise HTTPException(status_code = 404, detail = "Survey task not found for this application")
-    
-    current_status = survey["status"]
-    new_milestone = milestone.milestone_type.value
-
-    if current_status == "assigned":
-        expected_milestone = "visit_scheduled"
-
-    elif current_status == "visit_scheduled":
-        expected_milestone = "arrived_on_site"
-
-    elif current_status == "arrived_on_site":
-        expected_milestone = "survey_started"
-
-    elif current_status == "survey_started":
-        expected_milestone = "survey_completed"
-
-    elif current_status == "registrar_reviewed":
-        raise HTTPException(status_code = 400, detail = "Survey task already reached final milestone")
-
-    else:
-        raise HTTPException(status_code = 400, detail = "Invalid current survey task status")
-
-    if new_milestone != expected_milestone:
-        raise HTTPException(status_code = 400, detail = "Invalid milestone transition")
-    
-    result = survey_tasks.update_one(
-        {"_id": survey["_id"]},
-        {
-            "$push": {
-                "milestones": {
-                    "type": new_milestone,
-                    "at": datetime.now(timezone.utc),
-                    "by": milestone.by.value,
-                    "meta": milestone.meta
-                }
-            },
-            "$set": {
-                "status": new_milestone
-            }
-        }
-    )
-    
-    if result.matched_count == 0:
-        raise HTTPException(status_code = 404, detail = "Survey task not found while updating milestone")
-    
-    if milestone.by.value == "surveyor":
-        actor_id = str(survey["assigned_surveyor_id"])
-    else:
-        actor_id = "system"
-
-    log_document = {
-    "application_id": application_id,
-    "event_stream": [
-        {
-            "type": "survey_milestone_added",
-            "by": {
-                "actor_type": milestone.by.value,
-                "actor_id": actor_id
-            },
-            "at": datetime.now(timezone.utc),
-            "meta": {
-                "task_id": survey["task_id"],
-                "previous_status": current_status,
-                "new_status": new_milestone,
-                "milestone_type": new_milestone,
-                "milestone_meta": milestone.meta
-                }
-            }
-        ]
-    }
-
-    crud.create(performance_logs, log_document)
-
-    return {
-    "message": "Survey milestone added successfully",
-    "application_id": application_id,
-    "survey_task_id": str(survey["_id"]),
-    "task_id": survey["task_id"],
-    "previous_status": current_status,
-    "new_status": new_milestone,
-    "milestone_by": milestone.by.value
+MILESTONE_SEQUENCE = {
+    "assigned": "visit_scheduled",
+    "visit_scheduled": "arrived_on_site",
+    "arrived_on_site": "survey_started",
+    "survey_started": "survey_completed",
 }
 
-def add_survey_report(application_id: str, report: SurveyReportRequest):
-    application = crud.get_one(land_applications, {"application_id": application_id})
+
+def _application_or_404(application_id: str) -> dict:
+    application = applications.find_one({"application_id": application_id})
     if not application:
-        raise HTTPException(status_code = 404, detail = "Application not found")
-    
-    survey = crud.get_one(survey_tasks, {"application_id": application_id})
-    if not survey:
-        raise HTTPException(status_code = 404, detail = "Survey task not found for this application")
-    
-    if survey["status"] != "survey_completed":
-        raise HTTPException(status_code = 400, detail = "Survey task is not completed yet")
-    
-    report_id = f"REP-2026-{uuid4().hex[:8].upper()}"
-    document = {
-        "report_id": report_id,
-        "application_id": application_id,
-        "task_id": survey["task_id"],
-        "uploaded_by": report.uploaded_by,
-        "report_title": report.report_title,
-        "summary": report.summary,
-        "file_name": report.file_name,
-        "file_path": report.file_path,
-        "created_at": datetime.now(timezone.utc)
-    }
+        raise HTTPException(status_code=404, detail="Application not found")
+    return application
 
-    inserted_id = crud.create(survey_reports, document)
 
-    result = survey_tasks.update_one(
-        {"_id": survey["_id"]},
-        {
-            "$push": {
-                "milestones": {
-                    "type": "report_uploaded",
-                    "at": datetime.now(timezone.utc),
-                    "by": "surveyor",
-                    "meta": {
-                        "report_id": report_id,
-                        "file_name": report.file_name
-                    }
-                }
-            },
-            "$set": {
-                "status": "report_uploaded",
-                "report_uploaded": True
-            }
-        }
+def _task_or_404(application_id: str) -> dict:
+    task = tasks.find_one({"application_id": application_id})
+    if not task:
+        raise HTTPException(status_code=404, detail="Survey task not found")
+    return task
+
+
+def list_tasks(
+    surveyor_id: str | None, task_status: str | None, zone_id: str | None, page: int, page_size: int
+) -> dict:
+    query: dict = {}
+    if surveyor_id:
+        if not ObjectId.is_valid(surveyor_id):
+            raise HTTPException(status_code=400, detail="Invalid surveyor ID")
+        query["assigned_surveyor_id"] = ObjectId(surveyor_id)
+    if task_status:
+        query["status"] = task_status
+    if zone_id:
+        query["zone_id"] = zone_id
+    total = tasks.count_documents(query)
+    rows = list(tasks.find(query).sort("created_at", -1).skip((page - 1) * page_size).limit(page_size))
+    return page_response(rows, total, page, page_size)
+
+
+def auto_assign_surveyor(application_id: str) -> dict:
+    application = _application_or_404(application_id)
+    if application["status"] != "survey_required":
+        raise HTTPException(status_code=409, detail="Application must be in survey_required state")
+    existing = tasks.find_one({"application_id": application_id})
+    if existing:
+        return serialize(existing)
+    zone = application.get("parcel_ref", {}).get("zone_id")
+    if not zone:
+        raise HTTPException(status_code=409, detail="Application parcel zone is missing")
+
+    candidates = list(staff.find({"role": "surveyor", "active": True, "coverage.zone_ids": zone}).limit(200))
+    candidates = [
+        member
+        for member in candidates
+        if member.get("workload", {}).get("active_tasks", 0) < member.get("workload", {}).get("max_tasks", 0)
+    ]
+    if not candidates:
+        raise HTTPException(status_code=404, detail="No available surveyor covers this zone")
+    application_type = application.get("application_type")
+    candidates.sort(
+        key=lambda member: (
+            0 if application_type in member.get("skills", []) else 1,
+            member.get("workload", {}).get("active_tasks", 0) / max(member.get("workload", {}).get("max_tasks", 1), 1),
+            member.get("staff_code", ""),
+        )
     )
-
-    if result.matched_count == 0:
-        raise HTTPException(status_code = 404, detail = "Survey task not found while uploading report")
-
-    log_document = {
-    "application_id": application_id,
-    "event_stream": [
-        {
-            "type": "survey_report_uploaded",
-            "by": {
-                "actor_type": "surveyor",
-                "actor_id": report.uploaded_by
-            },
-            "at": datetime.now(timezone.utc),
-            "meta": {
-                "task_id": survey["task_id"],
-                "report_id": report_id,
-                "file_name": report.file_name
-                }
-            }
-        ]
-    }
-
-    crud.create(performance_logs, log_document)
-
-    return {
-        "message": "Survey report uploaded successfully",
+    surveyor = candidates[0]
+    now = datetime.now(timezone.utc)
+    task = {
+        "task_id": f"SURV-{now.year}-{uuid4().hex[:8].upper()}",
         "application_id": application_id,
-        "survey_task_id": str(survey["_id"]),
-        "task_id": survey["task_id"],
-        "report_mongo_id": str(inserted_id),
-        "report_id": report_id,
-        "status": "report_uploaded"
+        "parcel_id": application["parcel_ref"]["parcel_id"],
+        "zone_id": zone,
+        "priority": application.get("priority", "normal"),
+        "assigned_surveyor_id": surveyor["_id"],
+        "assigned_surveyor_name": surveyor["name"],
+        "status": "assigned",
+        "milestones": [{"type": "assigned", "at": now, "by": "system", "meta": {"reason": "zone, skill, capacity, and workload match"}}],
+        "field_notes": [],
+        "report_uploaded": False,
+        "created_at": now,
+        "updated_at": now,
     }
+    tasks.insert_one(task)
+    staff.update_one({"_id": surveyor["_id"]}, {"$inc": {"workload.active_tasks": 1}})
+    applications.update_one(
+        {"_id": application["_id"]},
+        {"$set": {"assignment.assigned_surveyor_id": surveyor["_id"], "assignment.assignment_policy": "zone+skill+capacity+workload", "timestamps.updated_at": now}},
+    )
+    create_log(application_id, "survey_assigned", {"task_id": task["task_id"], "surveyor_id": str(surveyor["_id"])})
+    return serialize(task)
 
-def registrar_review(application_id: str, review: RegistrarReviewRequest):
-    application = crud.get_one(land_applications, {"application_id": application_id})
-    if not application:
-        raise HTTPException(status_code = 404, detail = "Application not found")
-    
-    survey = crud.get_one(survey_tasks, {"application_id": application_id})
-    if not survey:
-        raise HTTPException(status_code = 404, detail = "Survey task not found for this application")
-    
-    report = crud.get_one(survey_reports, {"application_id": application_id})
-    if not report:
-        raise HTTPException(status_code = 404, detail = "Survey report not found for this application")
-    
-    if survey["status"] == "registrar_reviewed":
-        raise HTTPException(status_code = 400, detail = "Survey task already reviewed by registrar")
-    
-    if survey["status"] != "report_uploaded":
-        raise HTTPException(status_code = 400, detail = "Survey report must be uploaded before registrar review")
-    
-    decision = review.decision.value
-    if decision == "approved":
-        status = "approved"
-    elif decision == "rejected":
-        status = "rejected"
+
+def add_milestone(application_id: str, data) -> dict:
+    _application_or_404(application_id)
+    task = _task_or_404(application_id)
+    expected = MILESTONE_SEQUENCE.get(task["status"])
+    target = data.milestone_type.value
+    if target != expected:
+        raise HTTPException(status_code=409, detail=f"Next milestone must be {expected or 'none'}")
+    now = datetime.now(timezone.utc)
+    milestone = {"type": target, "at": now, "by": data.by.value, "meta": data.meta}
+    result = tasks.find_one_and_update(
+        {"_id": task["_id"], "status": task["status"]},
+        {"$push": {"milestones": milestone}, "$set": {"status": target, "updated_at": now}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not result:
+        raise HTTPException(status_code=409, detail="Task changed; reload and try again")
+    create_log(application_id, "survey_milestone_added", {"task_id": task["task_id"], "milestone": target})
+    return serialize(result)
+
+
+def add_report(application_id: str, data) -> dict:
+    application = _application_or_404(application_id)
+    task = _task_or_404(application_id)
+    if task["status"] != "survey_completed":
+        raise HTTPException(status_code=409, detail="Survey must be completed before report upload")
+    existing = reports.find_one({"application_id": application_id})
+    if existing:
+        return serialize(existing)
+    now = datetime.now(timezone.utc)
+    report = {
+        "report_id": f"REP-{now.year}-{uuid4().hex[:8].upper()}",
+        "application_id": application_id,
+        "task_id": task["task_id"],
+        **data.model_dump(),
+        "created_at": now,
+    }
+    reports.insert_one(report)
+    tasks.update_one(
+        {"_id": task["_id"]},
+        {"$push": {"milestones": {"type": "report_uploaded", "at": now, "by": "surveyor", "meta": {"report_id": report["report_id"]}}}, "$set": {"status": "report_uploaded", "report_uploaded": True, "updated_at": now}},
+    )
+    applications.update_one(
+        {"_id": application["_id"]},
+        {"$set": {"status": "surveyed", "workflow.current_state": "surveyed", "workflow.allowed_next": ["legal_review"], "survey.report_id": report["report_id"], "timestamps.surveyed_at": now, "timestamps.updated_at": now}},
+    )
+    create_log(application_id, "survey_report_uploaded", {"report_id": report["report_id"]})
+    return serialize(report)
+
+
+def registrar_review(application_id: str, data) -> dict:
+    application = _application_or_404(application_id)
+    task = _task_or_404(application_id)
+    report = reports.find_one({"application_id": application_id})
+    if not report or task["status"] != "report_uploaded":
+        raise HTTPException(status_code=409, detail="A survey report is required before registrar review")
+    if application["status"] not in {"surveyed", "legal_review"}:
+        raise HTTPException(status_code=409, detail="Application is not ready for registrar review")
+    if data.decision.value == "approved":
+        unverified = [doc["document_type"] for doc in application.get("required_documents", []) if doc.get("required") and doc.get("status") != "verified"]
+        if unverified:
+            raise HTTPException(status_code=409, detail=f"Documents require verification: {', '.join(unverified)}")
+        new_status = "approved"
+    elif data.decision.value == "rejected":
+        new_status = "rejected"
     else:
-        status = "on_hold"
-
-    application_data = {
-    "status": status,
-    "registrar_review.reviewed_by": review.reviewed_by,
-    "registrar_review.decision": decision,
-    "registrar_review.notes": review.notes,
-    "registrar_review.reviewed_at": datetime.now(timezone.utc),
-    "timestamps.legal_review_at": datetime.now(timezone.utc),
-    "timestamps.updated_at": datetime.now(timezone.utc)
-    }
-
-    updated_application = crud.update_one(land_applications, {"application_id": application_id}, application_data)
-
-    if not updated_application:
-        raise HTTPException(status_code = 404, detail = "Application not found while updating registrar review")
-
-    result = survey_tasks.update_one(
-        {"_id": survey["_id"]},
-        {
-            "$push": {
-                "milestones": {
-                    "type": "registrar_reviewed",
-                    "at": datetime.now(timezone.utc),
-                    "by": "registrar",
-                    "meta": {
-                        "decision": decision,
-                        "notes": review.notes,
-                        "reviewed_by": review.reviewed_by
-                    }
-                }
-            },
-            "$set": {
-                "status": "registrar_reviewed"
-            }
-        }
+        new_status = "on_hold"
+    now = datetime.now(timezone.utc)
+    review = {"reviewed_by": data.reviewed_by, "decision": data.decision.value, "notes": data.notes, "reviewed_at": now}
+    applications.update_one(
+        {"_id": application["_id"]},
+        {"$set": {"status": new_status, "workflow.current_state": new_status, "workflow.allowed_next": ["certificate_issued"] if new_status == "approved" else [], "registrar_review": review, "timestamps.legal_review_at": now, f"timestamps.{new_status}_at": now, "timestamps.updated_at": now}},
     )
-
-    if result.matched_count == 0:
-        raise HTTPException(status_code = 404, detail = "Survey task not found while updating registrar review")
-    
-    staff_members.update_one(
-    {"_id" : survey["assigned_surveyor_id"]},
-    {"$inc" : {"workload.active_tasks": -1}}
+    tasks.update_one(
+        {"_id": task["_id"]},
+        {"$push": {"milestones": {"type": "registrar_reviewed", "at": now, "by": "registrar", "meta": review}}, "$set": {"status": "registrar_reviewed", "updated_at": now}},
     )
-
-    log_document = {
-    "application_id": application_id,
-    "event_stream": [
-        {
-            "type": "registrar_reviewed",
-            "by": {
-                "actor_type": "registrar",
-                "actor_id": review.reviewed_by
-            },
-            "at": datetime.now(timezone.utc),
-            "meta": {
-                "task_id": survey["task_id"],
-                "report_id": report["report_id"],
-                "decision": decision,
-                "status": status,
-                "notes": review.notes
-                }
-            }
-        ]
-    }
-
-    crud.create(performance_logs, log_document)
-
-    return {
-        "message": "Registrar review completed successfully",
-        "application_id": application_id,
-        "survey_task_id": str(survey["_id"]),
-        "task_id": survey["task_id"],
-        "report_id": report["report_id"],
-        "decision": decision,
-        "status": status,
-        "survey_status": "registrar_reviewed"
-    }
+    staff.update_one({"_id": task["assigned_surveyor_id"], "workload.active_tasks": {"$gt": 0}}, {"$inc": {"workload.active_tasks": -1}})
+    if ObjectId.is_valid(application["applicant_ref"]["applicant_id"]):
+        increments = {"stats.pending_applications": -1}
+        if new_status == "approved":
+            increments["stats.approved_applications"] = 1
+        applicants.update_one({"_id": ObjectId(application["applicant_ref"]["applicant_id"])}, {"$inc": increments})
+    create_log(application_id, "registrar_reviewed", {"decision": data.decision.value, "status": new_status})
+    return {"application_id": application_id, "task_id": task["task_id"], "report_id": report["report_id"], "decision": data.decision.value, "status": new_status}

@@ -1,36 +1,30 @@
-from pydantic_settings import BaseSettings
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    APP_NAME: str
+    APP_NAME: str = "Land Registration API"
+    API_PREFIX: str = "/api"
+    DATABASE_NAME: str = "land_registration"
+    MONGODB_URL: str = "mongodb://127.0.0.1:27017"
+    CORS_ORIGINS: str = "http://127.0.0.1:5173,http://localhost:5173"
+    STAFF_API_KEY: str | None = None
 
-    DATABASE_NAME: str
-
-    MONGODB_HOST: str
-    MONGODB_USER: str
-    MONGODB_PASSWORD: str
-    MONGODB_APP_NAME: str
-
-    SECRET_KEY: str
-
-    ACCESS_TOKEN_EXPIRE_MINUTES: int
-    REFRESH_TOKEN_EXPIRE_DAYS: int
-
-    ALGORITHM: str
+    model_config = SettingsConfigDict(
+        env_file=(".env", "LandRegistrationAPI/.env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     @property
-    def MONGODB_URL(self):
-        return (
-            f"mongodb+srv://{self.MONGODB_USER}:"
-            f"{self.MONGODB_PASSWORD}@"
-            f"{self.MONGODB_HOST}/"
-            f"{self.DATABASE_NAME}"
-            f"?retryWrites=true&w=majority"
-            f"&appName={self.MONGODB_APP_NAME}"
-        )
-
-    class Config:
-        env_file = ".env"
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
 
 
-settings = Settings()
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()

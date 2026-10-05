@@ -1,21 +1,16 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.database.mongo import db
-from app.shared.crud import create
 
 logs_collection = db["performance_logs"]
 
 
-def create_log(application_id, action, details=None):
-
-    log = {
-        "application_id": application_id,
-        "action": action,
-        "details": details,
-        "created_at": datetime.utcnow(),
-    }
-
-    return create(
-        logs_collection,
-        log,
+def create_log(application_id: str, action: str, details: dict | None = None) -> None:
+    logs_collection.insert_one(
+        {
+            "application_id": application_id,
+            "action": action,
+            "details": details or {},
+            "created_at": datetime.now(timezone.utc),
+        }
     )

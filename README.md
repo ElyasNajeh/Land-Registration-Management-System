@@ -1,140 +1,92 @@
-# Land Registration Management System
+# Land Registration
 
-A simple land registration web service and UI built with FastAPI (backend) and a static frontend (LandRegistrationUI).
-
-## Project structure
-
-- Land-Registration-Management-System-main/
-  - LandRegistrationAPI/ - FastAPI backend
-    - app/main.py - FastAPI app entrypoint
-    - app/core/config.py - configuration and environment settings
-    - app/features/ - feature routers and services (applications, assignments, survey assignments, applicants)
-    - requirements.txt - Python dependencies
-  - LandRegistrationUI/ - Static frontend (HTML/CSS/JS)
+A workflow-driven land registration system for managing applicants, parcel applications, supporting documents, surveys, registrar decisions, certificates, maps, and operational analytics.
 
 ## Features
 
-- Create and manage land applications
-- Assign surveyors and manage survey milestones and reports
-- Applicant management
-- Simple UI for interacting with the API
+- Applicant profiles with verification state and linked applications
+- Land application submission with parcel details, GeoJSON location, document metadata, and idempotency
+- Server-side application search, filtering, sorting, and pagination
+- Validated registration workflow, interruptions, notes, objections, document review, and certificate issuance
+- Workload-aware surveyor assignment, ordered field milestones, survey reports, and registrar review
+- Server-side KPI/aggregation endpoints and a filtered Leaflet parcel map
+- Responsive React staff dashboard with loading, empty, error, and pagination states
+
+## Technologies & Tools
+
+- React and Vite — component-based frontend and development/build tooling
+- FastAPI and Pydantic — typed HTTP API and request validation
+- MongoDB and PyMongo — document persistence, indexes, aggregation, and GeoJSON queries
+- Leaflet and OpenStreetMap — interactive parcel/application map
+- Pytest, Mongomock, and HTTPX — isolated API workflow tests
 
 ## Prerequisites
 
-- Python 3.10+ (recommended)
-- pip
-- Node.js (optional, for running `LandRegistrationUI` server if you prefer node)
-- A MongoDB instance (Atlas or local)
+- Python 3.10 or newer
+- Node.js 20 or newer with npm
+- MongoDB 6 or newer, locally or through MongoDB Atlas
 
-## Environment variables
+## Environment Variables
 
-Create a `.env` file in `LandRegistrationAPI/` containing at least the following:
+Backend variables are documented in `LandRegistrationAPI/.env.example`:
 
-```
-APP_NAME=Land Registration API
-DATABASE_NAME=<your_db_name>
-MONGODB_HOST=<host>
-MONGODB_USER=<user>
-MONGODB_PASSWORD=<password>
-MONGODB_APP_NAME=<app_name>
-SECRET_KEY=<secret>
-ACCESS_TOKEN_EXPIRE_MINUTES=60
-REFRESH_TOKEN_EXPIRE_DAYS=30
-ALGORITHM=HS256
-```
+- `APP_NAME` — API display name
+- `API_PREFIX` — API route prefix; defaults to `/api`
+- `DATABASE_NAME` — MongoDB database name
+- `MONGODB_URL` — MongoDB connection URI
+- `CORS_ORIGINS` — comma-separated permitted frontend origins
+- `STAFF_API_KEY` — optional staff endpoint protection key
 
-The application reads settings from `app/core/config.py` and loads `.env` automatically.
+The frontend accepts `VITE_API_URL`; `/api` uses the included Vite development proxy. Do not place secrets in frontend variables.
 
-## Install and run (backend)
-
-1. Create and activate a virtual environment:
-
-On Windows (PowerShell):
-
-```powershell
-python -m venv venv
-venv\Scripts\Activate.ps1
-```
-
-On macOS / Linux:
+## Getting Started
 
 ```bash
-python -m venv venv
-source venv/bin/activate
+git clone <repository-url>
+cd Land-Registration-Management-System
+python -m venv .venv
 ```
 
-2. Install dependencies:
+Activate the virtual environment (`.venv\Scripts\Activate.ps1` on PowerShell or `source .venv/bin/activate` on macOS/Linux), then configure and run the backend:
 
 ```bash
 pip install -r requirements.txt
+cp LandRegistrationAPI/.env.example LandRegistrationAPI/.env
+cd LandRegistrationAPI
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-3. Run the API (from the `LandRegistrationAPI` folder):
-
-```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-The API will be available at `http://localhost:8000`.
-
-## Run the frontend
-
-The UI is a static site in `LandRegistrationUI/`. You can open `index.html` directly in a browser or serve it with a simple static server.
-
-If the project includes `server.cjs`, you can start it with Node.js:
+Set `MONGODB_URL` and `DATABASE_NAME` in `LandRegistrationAPI/.env`. Required indexes are created automatically when the API starts. In another terminal, run the frontend:
 
 ```bash
 cd LandRegistrationUI
-node server.cjs
+cp .env.example .env
+npm install
+npm run dev
 ```
 
-Or use a simple Python static server for development:
+Open `http://127.0.0.1:5173`. API documentation is available at `http://127.0.0.1:8000/docs`. Run verification with:
 
 ```bash
+pip install -r requirements-dev.txt
+pytest
 cd LandRegistrationUI
-python -m http.server 3000
-# then open http://localhost:3000 in your browser
+npm run lint
+npm run build
 ```
 
-## API Endpoints (overview)
+On PowerShell, use `Copy-Item` instead of `cp` if preferred.
 
-The backend registers several routers. Key endpoints include:
+## Project Structure
 
-- Applications
-  - `POST /applications/` — Create application
-  - `GET /applications/` — List applications (supports query params `status`, `application_type`, `skip`, `limit`, `sort_field`, `sort_order`)
-  - `GET /applications/{application_id}` — Get application by id
-  - `PATCH /applications/{application_id}/transition` — Change application status
-  - `POST /applications/{application_id}/hold` — Put application on hold
-  - `POST /applications/{application_id}/reject` — Reject application
-  - `POST /applications/{application_id}/certificate` — Generate certificate
-  - `POST /applications/{application_id}/notes` — Add note
-  - `POST /applications/{application_id}/missing-documents` — Mark missing documents
-  - `POST /applications/{application_id}/objection` — Mark under objection
+- `LandRegistrationAPI/app/` — FastAPI configuration, MongoDB integration, feature routers, schemas, and services
+- `LandRegistrationUI/src/` — React pages, reusable components, hooks, and API client
+- `LandRegistrationUI/css/` — preserved visual system and responsive layout
+- `COMP4382_Land_Registration_Final_Project2nd2025-2026.pdf` — original project specification
 
-- Assignments
-  - `POST /applications/{application_id}/auto-assign-surveyor` — Auto assign a surveyor
-  - `PATCH /applications/{application_id}/survey-milestone` — Add survey milestone
-  - `POST /applications/{application_id}/survey-report` — Add survey report
-  - `PATCH /applications/{application_id}/registrar-review` — Registrar review
 
-- Survey Assignments
-  - `POST /staff/` — Create staff
-  - `GET /staff/{staff_id}` — Get staff by id
+## Team Members
 
-- Applicants
-  - `POST /applicants/` — Create applicant
-  - `GET /applicants/{applicant_id}` — Get applicant
-  - `GET /applicants/{applicant_id}/applications` — List applicant's applications
-
-Refer to the router files in `app/features/` for request schemas and more details.
-
-## Notes and next steps
-
-- Update the `.env` with correct MongoDB connection details.
-- Add API docs links: when running the server, FastAPI exposes OpenAPI at `/docs` and `/redoc`.
-- Consider adding tests and Dockerfile for easy deployment.
-
-## Contact
-
-If you need further help setting up or documenting specific endpoints, open an issue or ask for more details.
+- [Elyas Najeh](https://github.com/ElyasNajeh).
+- [Hareth Shoman](https://github.com/Hareth5).
+- **QA:** [Ahmad Omariyeh](https://github.com/Ahmad-Omaryeh).
