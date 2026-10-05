@@ -84,9 +84,8 @@ On PowerShell, use `Copy-Item` instead of `cp` if preferred.
 - `LandRegistrationUI/css/` — preserved visual system and responsive layout
 - `COMP4382_Land_Registration_Final_Project2nd2025-2026.pdf` — original project specification
 
-
 ## Team Members
 
-- [Elyas Najeh](https://github.com/ElyasNajeh).
-- [Hareth Shoman](https://github.com/Hareth5).
-- [Ahmad Omariyeh](https://github.com/Ahmad-Omaryeh).
+- [Elyas Najeh](https://github.com/ElyasNajeh)
+- [Hareth Shoman](https://github.com/Hareth5)
+- [Ahmad Omariyeh](https://github.com/Ahmad-Omaryeh)
